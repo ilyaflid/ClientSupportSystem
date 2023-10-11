@@ -42,10 +42,14 @@ namespace ClientSupportService
 
         public void RemoveSession(ClientSession session)
         {
-            if (!_sessions.ContainsKey(session.SessionId))
+            RemoveSession(session.SessionId);
+        }
+        public void RemoveSession(Guid sessionId)
+        {
+            if (!_sessions.ContainsKey(sessionId))
                 return;
 
-            _sessions.Remove(session.SessionId);
+            _sessions.Remove(sessionId);
         }
     }
 }

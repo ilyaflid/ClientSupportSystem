@@ -8,68 +8,46 @@ using System.Reactive.Subjects;
 
 namespace ClientSupportService
 {
-    public class SessionManager : ISessionManager, IDisposable
+    public class SessionManager : ISessionManager
     {
-        private readonly ILogger _logger;
-        private readonly List<RegularAgent> _regularAgentsPool = new List<RegularAgent>();
-        private readonly List<AdditionalAgent> _additionalAgentsPool = new List<AdditionalAgent>();
-        private readonly List<AgentQueue> _agentQueues = new List<AgentQueue>();
-        private readonly int _maximumConcurrencyPerAgent;
+        private readonly ILogger _logger;       
         private readonly TimeSpan _sessionTimeout;
         private readonly ISessionStorage _sessionStorage;
         private readonly IDateTimeService _dateTimeService;
         private readonly Timer _timer;
-        private readonly ShiftAlert _shiftAlert;
+        private readonly ISessionAllocationManager _allocationManager;
 
         private const int _sessionCheckPeriodInSeconds = 1;
 
-        // Stores all allocations of sessions to agents
-        private Dictionary<Guid, AgentQueue> _sessionToAgentQueueDict;
         // Stores all active sessions (not in queue)
         private Dictionary<Guid, ClientSession> _activeClientSessions;
-
         public int Capacity
         {
-            get => (int)Math.Floor(_regularAgentsPool
-                    .Where(p => p.IsWorkingNow(_dateTimeService))
-                    .Sum(p => p.Efficiency * _maximumConcurrencyPerAgent));
+            get => _allocationManager.Capacity;
         }
         public int MaximumQueueSize
         {
             get => (int)Math.Floor(Capacity * 1.5);
         }
-        public SessionManager(ISessionStorage storage, IDateTimeService dateTimeService, ILogger logger, IClientSupportServiceConfiguration configuration)
+        public SessionManager(ISessionStorage storage, ISessionAllocationManager allocationManager, IDateTimeService dateTimeService, ILogger logger, IClientSupportServiceConfiguration configuration)
         {
             _logger = logger;
-            _regularAgentsPool = configuration.RegularAgents;
-            _additionalAgentsPool = configuration.AdditionalAgents;
-            _maximumConcurrencyPerAgent = configuration.MaximumConcurrencyPerAgent;
             _sessionTimeout = configuration.SessionTimeout;
             _sessionStorage = storage;
             _dateTimeService = dateTimeService;
+            _allocationManager = allocationManager
+                .SetOnShiftChangedAction(async () => await OnShiftChanged());
 
-            _sessionToAgentQueueDict = new Dictionary<Guid, AgentQueue>();
             _activeClientSessions = new Dictionary<Guid, ClientSession>();
-
-            InitializeAgentsQueues(configuration.MaximumConcurrencyPerAgent);
             InitializeSessionStorage();
 
-            _shiftAlert = new ShiftAlert(OnShiftChanged, configuration.RegularAgents.Select(t => t.ShiftStartTime).Union(configuration.RegularAgents.Select(t => t.ShiftEndTime)));
             _timer = new Timer(o => CheckSessionExpiration(), new { }, TimeSpan.Zero, TimeSpan.FromSeconds(_sessionCheckPeriodInSeconds));
-        }
-
-        private void InitializeAgentsQueues(int maximumConcurrencyPerAgent)
-        {
-            foreach (var agent in _regularAgentsPool)
-                _agentQueues.Add(new AgentQueue(agent, maximumConcurrencyPerAgent));
-            foreach (var agent in _additionalAgentsPool)
-                _agentQueues.Add(new AgentQueue(agent, maximumConcurrencyPerAgent));
         }
 
         private void InitializeSessionStorage()
         {
             _sessionStorage.SetMaximumQueueSize(MaximumQueueSize);
-            _sessionStorage.OnSessionCreated = OnSessionCreated;
+            _sessionStorage.OnSessionCreated = async () => await OnSessionCreated();
             _sessionStorage.OnSessionRemoved = OnSessionRemoved;
         }
 
@@ -89,60 +67,54 @@ namespace ClientSupportService
         public async Task<bool> ProlongateSessionAsync(Guid sessionId)
         {
             _logger.Information($"Requested prolongating the session {sessionId}");
-            var sessionProlongated = await _sessionStorage.ProlongateSessionAsync(sessionId);
-            if (!sessionProlongated)
+            var sessionInQueueProlongated = await _sessionStorage.ProlongateSessionAsync(sessionId);
+            if (sessionInQueueProlongated)
             {
-                if (!_activeClientSessions.ContainsKey(sessionId))
-                    return false;
-
-                _activeClientSessions[sessionId].Prolongate(_dateTimeService.Now);
+                _logger.Information($"The session {sessionId} prolongated");
+                return true;
             }
 
+            if (!_activeClientSessions.ContainsKey(sessionId))
+                return false;
+
+            _activeClientSessions[sessionId].Prolongate(_dateTimeService.Now);
             _logger.Information($"The session {sessionId} prolongated");
+
             return true;
         }
 
-        public void DestroySession(ClientSession session)
+        public async Task<bool> DestroySessionAsync(ClientSession session)
         {
-            if (_sessionToAgentQueueDict.ContainsKey(session.SessionId))
+            var sessionInQueueRemoved = await _sessionStorage.RemoveSessionAsync(session.SessionId);
+            if (sessionInQueueRemoved)
             {
-                var agent = _sessionToAgentQueueDict[session.SessionId];
-                agent.RemoveSession(session);
-                _sessionToAgentQueueDict.Remove(session.SessionId);
-                _activeClientSessions.Remove(session.SessionId);
-                _logger.Information($"Session {session} has been removed from agent {agent.Agent}");
+                _logger.Information($"Session {session} has been deleted");
+                return true;
             }
-            else
-                _sessionStorage.RemoveSessionAsync(session.SessionId);
 
-            _logger.Information($"Session {session} has been deleted");
+            if (!_activeClientSessions.ContainsKey(session.SessionId))
+                return false;
+
+            _activeClientSessions.Remove(session.SessionId);  
+            var allocatedSessionRemoved = _allocationManager.DestroySession(session.SessionId);
+            if (allocatedSessionRemoved)
+                _logger.Information($"Session {session} has been deleted");
+
+            return allocatedSessionRemoved;
         }
 
         public void AllocateSessionToAgent(ClientSession session)
         {
-            var agent = _agentQueues
-                .Where(p => p.Agent.IsAvailableToChat(_dateTimeService) && p.HasOpenSpots)
-                .OrderBy(p => p.Agent.Priority)
-                .ThenBy(p => p.QueueSize)
-                .FirstOrDefault();
-
-            if (agent == null)
-                return;
-           
-            agent.AddSession(session);
-            _sessionToAgentQueueDict.Add(session.SessionId, agent);
             _activeClientSessions.Add(session.SessionId, session);
-            _logger.Information($"Session {session} was allocated to agent {agent.Agent}");
+            _allocationManager.AllocateSessionToAgent(session);
         }
 
-        private void TryToAllocateSessionsFromQueue()
+        private async Task TryToAllocateSessionsFromQueue()
         {
-            while (_agentQueues
-                .Where(p => p.Agent.IsAvailableToChat(_dateTimeService) && p.HasOpenSpots)
-                .Sum(p => p.NumberOfOpenSpots) > 0)
+            while (_allocationManager.HasOpenSpots())
             {
                 var session =  
-                    _sessionStorage.PopFirstSessionInQueueAsync().GetAwaiter().GetResult();
+                    await _sessionStorage.PopFirstSessionInQueueAsync();
                 if (session == null)
                     break;
 
@@ -152,37 +124,33 @@ namespace ClientSupportService
 
         private void KickAdditionalAgent()
         {
-            var additionalAgent = _additionalAgentsPool
-                .FirstOrDefault(p => p.IsWorkingNow(_dateTimeService) && !p.IsAvailableToChat(_dateTimeService));
-            if (additionalAgent != null)
-                additionalAgent.MakeOpenToChat();
+            _allocationManager.KickAdditionalAgent();
         }
 
         private void RemoveAdditionalAgents()
         {
-            foreach (var agent in _additionalAgentsPool)
-                agent.MakeCloseToChat();
+            _allocationManager.RemoveAdditionalAgents();
         }
 
         private void CheckSessionExpiration()
         {
             // Removing expired sessions in the queue
-            _sessionStorage.RemoveExpiredSessionsAsync(_sessionTimeout).GetAwaiter().GetResult();
+            _sessionStorage.RemoveExpiredSessionsAsync(_sessionTimeout).Wait();
             
             // Removing expired sessions allocated to agents
             var expierdAllocatedSessions = _activeClientSessions.Values.Where(p => p.IsExpired(_sessionTimeout, _dateTimeService.Now)).ToList();
             foreach (var session in expierdAllocatedSessions)
-                DestroySession(session);
+                DestroySessionAsync(session).Wait();
 
-            TryToAllocateSessionsFromQueue();
+            TryToAllocateSessionsFromQueue().Wait();
         }
 
-        private void OnSessionCreated()
+        private async Task OnSessionCreated()
         {
             if (_sessionStorage.GetQueueSize() >= MaximumQueueSize)
                 KickAdditionalAgent();
 
-            TryToAllocateSessionsFromQueue();
+            await TryToAllocateSessionsFromQueue();
         }
 
         private void OnSessionRemoved()
@@ -191,7 +159,7 @@ namespace ClientSupportService
                 RemoveAdditionalAgents();
         }
 
-        private void OnShiftChanged()
+        private async Task OnShiftChanged()
         {
             var queueSize = _sessionStorage.GetQueueSize();
             if (queueSize >= MaximumQueueSize)
@@ -200,19 +168,7 @@ namespace ClientSupportService
                 RemoveAdditionalAgents();
 
             _sessionStorage.SetMaximumQueueSize(MaximumQueueSize);
-            TryToAllocateSessionsFromQueue();
-        }
-
-        public Agent? FindSessionAgent(Guid sessionId)
-        {
-            if (!_sessionToAgentQueueDict.ContainsKey(sessionId))
-                return null;
-
-            return _sessionToAgentQueueDict[sessionId].Agent;          
-        }
-        public void Dispose()
-        {
-            _shiftAlert.Dispose();
+            await TryToAllocateSessionsFromQueue();
         }
     }
 }

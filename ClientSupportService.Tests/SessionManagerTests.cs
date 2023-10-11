@@ -1,6 +1,7 @@
 using ClientSupportService.Interfaces;
 using Moq;
 using Serilog;
+using Xunit;
 
 namespace ClientSupportService.Tests
 {
@@ -58,6 +59,7 @@ namespace ClientSupportService.Tests
             sessionStorage.Setup(p => p.CreateSessionAsync())
                 .Returns(Task.FromResult<ClientSession?>(new ClientSession(Guid.NewGuid(), _dateTimeService.Now)));
             sessionStorage.Setup(p => p.ProlongateSessionAsync(It.IsAny<Guid>())).Returns(Task.FromResult(true));
+            sessionStorage.Setup(p => p.RemoveSessionAsync(It.IsAny<Guid>())).Returns(Task.FromResult(true));
             _sessionStorage = sessionStorage.Object;
 
             var sessionStorageFailedToCreateSession = new Mock<ISessionStorage>();
@@ -70,35 +72,36 @@ namespace ClientSupportService.Tests
                 .Returns(Task.FromResult(false));
             _sessionStorageFailedToProlongate = sessionStorageFailedToProlongateSession.Object;
         }
-
+        
         [Fact]
-        public void SessionManager_CapacityOnFirstShift_Tests()
+        public void SessionManager_Capacity_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService, _logger, _configuration);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
+
+            var allocationManager2 = new Mock<ISessionAllocationManager>();
+            allocationManager2.Setup(p => p.Capacity).Returns(11);
+            allocationManager2.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager2.Object);
+
+            var sessionManager = new SessionManager(_sessionStorage, allocationManager.Object, _dateTimeService, _logger, _configuration);
+            var sessionManager2 = new SessionManager(_sessionStorage, allocationManager2.Object, _dateTimeService, _logger, _configuration);
+            
             Assert.Equal(12, sessionManager.Capacity);
             Assert.Equal(18, sessionManager.MaximumQueueSize);
-        }
 
-        [Fact]
-        public void SessionManager_CapacityOnSecondShift_Tests()
-        {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService_SecondShift, _logger, _configuration);
-            Assert.Equal(9, sessionManager.Capacity);
-            Assert.Equal(13, sessionManager.MaximumQueueSize);
-        }
-
-        [Fact]
-        public void SessionManager_CapacityOnThirdShift_Tests()
-        {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService_ThirdShift, _logger, _configuration);
-            Assert.Equal(12, sessionManager.Capacity);
-            Assert.Equal(18, sessionManager.MaximumQueueSize);
+            Assert.Equal(11, sessionManager2.Capacity);
+            Assert.Equal(16, sessionManager2.MaximumQueueSize);
         }
 
         [Fact]
         public async Task SessionManager_CreateSession_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService, _logger, _configuration);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
+
+            var sessionManager = new SessionManager(_sessionStorage, allocationManager.Object, _dateTimeService, _logger, _configuration);
 
             var result = await sessionManager.CreateSessionAsync();
             Assert.NotNull(result);
@@ -107,7 +110,11 @@ namespace ClientSupportService.Tests
         [Fact]
         public async Task SessionManager_FailedToCreateSession_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorageFailedToCreate, _dateTimeService, _logger, _configuration);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
+
+            var sessionManager = new SessionManager(_sessionStorageFailedToCreate, allocationManager.Object, _dateTimeService, _logger, _configuration);
 
             var result = await sessionManager.CreateSessionAsync();
             Assert.Null(result);
@@ -116,7 +123,11 @@ namespace ClientSupportService.Tests
         [Fact]
         public async Task SessionManager_FailedToProlongateStorageSessionNoClientSessions_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorageFailedToProlongate, _dateTimeService, _logger, _configuration);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
+
+            var sessionManager = new SessionManager(_sessionStorageFailedToProlongate, allocationManager.Object, _dateTimeService, _logger, _configuration);
             
             var result = await sessionManager.ProlongateSessionAsync(Guid.NewGuid());
             Assert.False(result);
@@ -125,7 +136,11 @@ namespace ClientSupportService.Tests
         [Fact]
         public async Task SessionManager_FailedToProlongateStorageSessionExistingClientSessions_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorageFailedToProlongate, _dateTimeService, _logger, _configuration);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
+
+            var sessionManager = new SessionManager(_sessionStorageFailedToProlongate, allocationManager.Object, _dateTimeService, _logger, _configuration);
             var session = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
             sessionManager.AllocateSessionToAgent(session);
 
@@ -136,143 +151,66 @@ namespace ClientSupportService.Tests
         [Fact]
         public async Task SessionManager_SucceedToProlongateStorageSession_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService, _logger, _configuration);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
+
+            var sessionManager = new SessionManager(_sessionStorage, allocationManager.Object, _dateTimeService,  _logger, _configuration);
             
             var result = await sessionManager.ProlongateSessionAsync(Guid.NewGuid());
             Assert.True(result);
         }
 
         [Fact]
-        public void SessionManager_DestroyAllocatedSessions_Tests()
+        public async Task SessionManager_SucceedToRemoveSessionFromStorage_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService, _logger, _configuration);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
+
+            var sessionManager = new SessionManager(_sessionStorage, allocationManager.Object, _dateTimeService, _logger, _configuration);
             var session = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
             sessionManager.AllocateSessionToAgent(session);
 
-            var allocatedAgent = sessionManager.FindSessionAgent(session.SessionId);
-            Assert.NotNull(allocatedAgent);
-        
-            sessionManager.DestroySession(session);
-            allocatedAgent = sessionManager.FindSessionAgent(session.SessionId);
-            Assert.Null(allocatedAgent);
+            var result = await sessionManager.DestroySessionAsync(session);
+            Assert.True(result);
         }
 
         [Fact]
-        public void SessionManager_AllocationsFirstShift_Tests()
+        public async Task SessionManager_SucceedToRemoveAllocatedSession_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService, _logger, _configuration);
-            var session1 = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
-            var session2 = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
-            var session3 = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
-            var session4 = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
-            var session5 = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
-            var session6 = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
-            
-            sessionManager.AllocateSessionToAgent(session1);
-            sessionManager.AllocateSessionToAgent(session2);
-            sessionManager.AllocateSessionToAgent(session3);
-            sessionManager.AllocateSessionToAgent(session4);
-            sessionManager.AllocateSessionToAgent(session5);
-            sessionManager.AllocateSessionToAgent(session6);
+            var sessionStorageFailedToRemoveSession = new Mock<ISessionStorage>();
+            sessionStorageFailedToRemoveSession.Setup(p => p.RemoveSessionAsync(It.IsAny<Guid>()))
+                .Returns(Task.FromResult(true));
 
-            var allocatedAgent1 = sessionManager.FindSessionAgent(session1.SessionId);
-            var allocatedAgent2 = sessionManager.FindSessionAgent(session2.SessionId);
-            var allocatedAgent3 = sessionManager.FindSessionAgent(session3.SessionId);
-            var allocatedAgent4 = sessionManager.FindSessionAgent(session4.SessionId);
-            var allocatedAgent5 = sessionManager.FindSessionAgent(session5.SessionId);
-            var allocatedAgent6 = sessionManager.FindSessionAgent(session6.SessionId);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
 
-            Assert.NotNull(allocatedAgent1);
-            Assert.NotNull(allocatedAgent2);
-            Assert.NotNull(allocatedAgent3);
-            Assert.NotNull(allocatedAgent4);
-            Assert.NotNull(allocatedAgent5);
-            Assert.NotNull(allocatedAgent6);
-            Assert.Equal(10, allocatedAgent1.Id);
-            Assert.Equal(10, allocatedAgent2.Id);
-            Assert.Equal(10, allocatedAgent3.Id);
-            Assert.Equal(10, allocatedAgent4.Id);
-            Assert.Equal(11, allocatedAgent5.Id);
-            Assert.Equal(11, allocatedAgent6.Id);
-        }
+            var sessionManager = new SessionManager(sessionStorageFailedToRemoveSession.Object, allocationManager.Object, _dateTimeService, _logger, _configuration);
+            var session = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
+            sessionManager.AllocateSessionToAgent(session);
 
-
-        [Fact]
-        public void SessionManager_AllocationsSecondShift_Tests()
-        {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService_SecondShift, _logger, _configuration);
-            var session1 = new ClientSession(Guid.NewGuid(), _dateTimeService_SecondShift.Now);
-            var session2 = new ClientSession(Guid.NewGuid(), _dateTimeService_SecondShift.Now);
-            var session3 = new ClientSession(Guid.NewGuid(), _dateTimeService_SecondShift.Now);
-            var session4 = new ClientSession(Guid.NewGuid(), _dateTimeService_SecondShift.Now);
-            var session5 = new ClientSession(Guid.NewGuid(), _dateTimeService_SecondShift.Now);
-            var session6 = new ClientSession(Guid.NewGuid(), _dateTimeService_SecondShift.Now);
-
-            sessionManager.AllocateSessionToAgent(session1);
-            sessionManager.AllocateSessionToAgent(session2);
-            sessionManager.AllocateSessionToAgent(session3);
-            sessionManager.AllocateSessionToAgent(session4);
-            sessionManager.AllocateSessionToAgent(session5);
-            sessionManager.AllocateSessionToAgent(session6);
-
-            var allocatedAgent1 = sessionManager.FindSessionAgent(session1.SessionId);
-            var allocatedAgent2 = sessionManager.FindSessionAgent(session2.SessionId);
-            var allocatedAgent3 = sessionManager.FindSessionAgent(session3.SessionId);
-            var allocatedAgent4 = sessionManager.FindSessionAgent(session4.SessionId);
-            var allocatedAgent5 = sessionManager.FindSessionAgent(session5.SessionId);
-            var allocatedAgent6 = sessionManager.FindSessionAgent(session6.SessionId);
-
-            Assert.NotNull(allocatedAgent1);
-            Assert.NotNull(allocatedAgent2);
-            Assert.NotNull(allocatedAgent3);
-            Assert.NotNull(allocatedAgent4);
-            Assert.NotNull(allocatedAgent5);
-            Assert.NotNull(allocatedAgent6);
-            Assert.Equal(12, allocatedAgent1.Id);
-            Assert.Equal(12, allocatedAgent2.Id);
-            Assert.Equal(12, allocatedAgent3.Id);
-            Assert.Equal(12, allocatedAgent4.Id);
-            Assert.Equal(13, allocatedAgent5.Id);
-            Assert.Equal(13, allocatedAgent6.Id);
+            var result = await sessionManager.DestroySessionAsync(session);
+            Assert.True(result);
         }
 
         [Fact]
-        public void SessionManager_AllocationsThirdShift_Tests()
+        public async Task SessionManager_FailedToRemoveAllocatedSession_Tests()
         {
-            var sessionManager = new SessionManager(_sessionStorage, _dateTimeService_ThirdShift, _logger, _configuration);
-            var session1 = new ClientSession(Guid.NewGuid(), _dateTimeService_ThirdShift.Now);
-            var session2 = new ClientSession(Guid.NewGuid(), _dateTimeService_ThirdShift.Now);
-            var session3 = new ClientSession(Guid.NewGuid(), _dateTimeService_ThirdShift.Now);
-            var session4 = new ClientSession(Guid.NewGuid(), _dateTimeService_ThirdShift.Now);
-            var session5 = new ClientSession(Guid.NewGuid(), _dateTimeService_ThirdShift.Now);
-            var session6 = new ClientSession(Guid.NewGuid(), _dateTimeService_ThirdShift.Now);
+            var sessionStorageFailedToRemoveSession = new Mock<ISessionStorage>();
+            sessionStorageFailedToRemoveSession.Setup(p => p.RemoveSessionAsync(It.IsAny<Guid>()))
+                .Returns(Task.FromResult(false));
 
-            sessionManager.AllocateSessionToAgent(session1);
-            sessionManager.AllocateSessionToAgent(session2);
-            sessionManager.AllocateSessionToAgent(session3);
-            sessionManager.AllocateSessionToAgent(session4);
-            sessionManager.AllocateSessionToAgent(session5);
-            sessionManager.AllocateSessionToAgent(session6);
+            var allocationManager = new Mock<ISessionAllocationManager>();
+            allocationManager.Setup(p => p.Capacity).Returns(12);
+            allocationManager.Setup(p => p.SetOnShiftChangedAction(It.IsAny<Action>())).Returns(allocationManager.Object);
 
-            var allocatedAgent1 = sessionManager.FindSessionAgent(session1.SessionId);
-            var allocatedAgent2 = sessionManager.FindSessionAgent(session2.SessionId);
-            var allocatedAgent3 = sessionManager.FindSessionAgent(session3.SessionId);
-            var allocatedAgent4 = sessionManager.FindSessionAgent(session4.SessionId);
-            var allocatedAgent5 = sessionManager.FindSessionAgent(session5.SessionId);
-            var allocatedAgent6 = sessionManager.FindSessionAgent(session6.SessionId);
+            var sessionManager = new SessionManager(sessionStorageFailedToRemoveSession.Object, allocationManager.Object, _dateTimeService, _logger, _configuration);
+            var session = new ClientSession(Guid.NewGuid(), _dateTimeService.Now);
 
-            Assert.NotNull(allocatedAgent1);
-            Assert.NotNull(allocatedAgent2);
-            Assert.NotNull(allocatedAgent3);
-            Assert.NotNull(allocatedAgent4);
-            Assert.NotNull(allocatedAgent5);
-            Assert.NotNull(allocatedAgent6);
-            Assert.Equal(14, allocatedAgent1.Id);
-            Assert.Equal(15, allocatedAgent2.Id);
-            Assert.Equal(14, allocatedAgent3.Id);
-            Assert.Equal(15, allocatedAgent4.Id);
-            Assert.Equal(14, allocatedAgent5.Id);
-            Assert.Equal(15, allocatedAgent6.Id);
+            var result = await sessionManager.DestroySessionAsync(session);
+            Assert.False(result);
         }
     }
 }

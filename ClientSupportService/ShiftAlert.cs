@@ -1,4 +1,5 @@
-﻿using System;
+﻿using ClientSupportService.Interfaces;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -12,7 +13,7 @@ namespace ClientSupportService
         private Action _callback;
         private CancellationTokenSource _cancellationToken;
         Task RunningTask { get; set; }
-        public ShiftAlert(Action callback, IEnumerable<TimeOnly> notificationTimes)
+        public ShiftAlert(Action callback, IEnumerable<TimeOnly> notificationTimes, IDateTimeService dateTimeService)
         { 
             _callback = callback;
             _notificationTimes = notificationTimes.Distinct().ToList();
@@ -24,15 +25,15 @@ namespace ClientSupportService
                 {
                     foreach (var notificationTime in notificationTimes)
                     {
-                        if (DateTime.Now.Date.Add(notificationTime.ToTimeSpan()) < DateTime.Now)
+                        if (dateTimeService.Now.Date.Add(notificationTime.ToTimeSpan()) < dateTimeService.Now)
                             continue;
 
-                        var delay = DateTime.Now.Date.Add(notificationTime.ToTimeSpan()) - DateTime.Now;
+                        var delay = dateTimeService.Now.Date.Add(notificationTime.ToTimeSpan()) - dateTimeService.Now;
                         await Task.Delay(delay, _cancellationToken.Token);
                         _callback();
                     }
 
-                    await Task.Delay(DateTime.Now.Date.AddDays(1) - DateTime.Now, _cancellationToken.Token);
+                    await Task.Delay(dateTimeService.Now.Date.AddDays(1) - dateTimeService.Now, _cancellationToken.Token);
                 }
             }, _cancellationToken.Token);
         }

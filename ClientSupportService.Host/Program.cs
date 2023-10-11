@@ -27,6 +27,7 @@ builder.Services.AddSingleton<ISessionManager, SessionManager>();
 builder.Services.AddSingleton<IClientSupportServiceConfiguration>( 
         new ConfigurationSettingsProvider(builder.Configuration));
 builder.Services.AddSingleton<ISessionStorage, SessionInMemoryStorage>();
+builder.Services.AddSingleton<ISessionAllocationManager, SessionAllocationManager>();
 builder.Services.AddSingleton<IDateTimeService, DateTimeService>();
 builder.Services.AddSingleton(logger);
 
